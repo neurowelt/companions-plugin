@@ -4,15 +4,13 @@ description: Verify the Companions API key is set and the MCP is reachable; othe
 
 # Companions — setup check
 
-Run these steps in order. Report the first failure clearly and stop.
+Call the `check_balance` MCP tool and report the first matching outcome:
 
-1. **Check the env var.** Is `COMPANIONS_API_KEY` set in the current shell? You can introspect this with `echo "${COMPANIONS_API_KEY:+set}${COMPANIONS_API_KEY:-unset}"`.
-   - If **unset**: print the instructions in the "Setup walkthrough" section below and stop. Do not try to call the MCP.
+- Returns a balance envelope → say "Companions is set up. Balance: $X." Done.
+- Returns 401 / authentication error, **or** the MCP request fails because the `Authorization` header expanded to an empty/missing key → the env var is either unset or the key is invalid. Print the "Setup walkthrough" below (note: if the user already had a key, they need to replace it).
+- Network / 5xx error → the key is fine but the service is unreachable. Print the service URL (`https://api.humx.ai/mcp`) and ask the user to confirm they're online.
 
-2. **Verify reachability.** Call the `check_balance` MCP tool. Three outcomes:
-   - Returns a balance envelope → say "Companions is set up. Balance: $X." Done.
-   - Returns 401 / authentication error → the env var is set but the key is invalid or expired. Print the "Setup walkthrough" with the note that the key needs to be replaced.
-   - Network / 5xx error → the key is fine but the service is unreachable. Print the service URL and ask the user to confirm they're online.
+Do not try to read `COMPANIONS_API_KEY` from the shell — the key is a secret and must not be echoed. The MCP call itself is the auth check.
 
 ## Setup walkthrough
 
