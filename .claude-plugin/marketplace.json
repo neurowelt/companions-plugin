@@ -9,7 +9,7 @@
     {
       "name": "companions",
       "description": "Consult a panel of expert personas via MCP. discover / consult / check_balance.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "source": "./",
       "author": {
         "name": "humx.ai"
