@@ -4,14 +4,14 @@ description: Use when the user's problem would benefit from domain-expert
   perspectives — explicit asks ("what would a neuroscientist say"),
   contested questions with no single right answer, or moments when
   you've hit a wall and need a fresh angle. Drives the `companions`
-  MCP server (discover, consult, check_balance). Not for things you
-  already know cold.
+  MCP server (discover, list_models, consult, check_balance). Not for
+  things you already know cold.
 ---
 
 # Consulting experts via the Companions MCP
 
 You have access to a panel of generated expert personas through the
-`companions` MCP server. The three tools you'll use are `discover`,
+`companions` MCP server. The tools are `discover`, `list_models`,
 `consult`, and `check_balance`. This skill tells you when to reach for
 them and how to interpret what comes back.
 
@@ -36,14 +36,25 @@ them and how to interpret what comes back.
 
 1. **First time this session:** call `check_balance`. If low, tell the
    user before spending. Cache the result for the session.
-2. **Call `discover`** to see what's available. Cache for the session.
+2. **Call `discover`** to see what experts exist. Cache for the session.
    You get `{teams, companions}`:
-   - `companions` is a flat list of every expert the caller can use.
-     Companion *names* — not UUIDs — are what `consult` expects.
-   - `teams` groups owned teams with their member companions. When the
-     user names a team, look up its `members` and pass those names as
+   - `companions` is a flat list of every expert the caller can use,
+     each shaped `{id, name, kind, visibility, description, teams}`.
+     `consult` accepts either the *name* (readable) or the `cmp_<uuid>`
+     id (use when a name is ambiguous).
+   - `teams` lists teams the caller owns or can see, each shaped
+     `{id, name, visibility, members: [{id, name, kind, description}]}`.
+     When the user names a team, pass its members' names (or ids) as
      `participants` to `consult`.
-3. **Pick a mode** based on question shape:
+3. **(Optional) Call `list_models`** if you're going to pass a `model`
+   override anywhere it's accepted (e.g. directly via the API). The
+   response is `{models: [{slug, display_name, temperature_min,
+   temperature_max, top_p_min, top_p_max}, ...]}`, alphabetically
+   sorted. Slugs outside this list are rejected at the wire boundary
+   with a 422 carrying the accepted slugs in `ctx.accepted`. Cache for
+   the session. **Don't** call this just for show — only when you
+   actually need to pick a model.
+4. **Pick a mode** based on question shape:
 
    | Question shape                                | Mode                  |
    |-----------------------------------------------|-----------------------|
@@ -54,14 +65,14 @@ them and how to interpret what comes back.
    | "Synthesise N expert views into one answer"   | `panel`               |
    | "I want X and Y to debate Z"                  | `discussion`          |
 
-4. **Call `consult`.** It blocks until done — don't ask the user to wait,
+5. **Call `consult`.** It blocks until done — don't ask the user to wait,
    just do it. Typical run is seconds to a minute; for longer modes
-   (`discussion`, `panel`) raise `timeout_seconds`.
-5. **Present the result with attribution** — read the right field of
+   (`discussion`, `panel`) raise `timeout_seconds` (default 600).
+6. **Present the result with attribution** — read the right field of
    `content` per mode (see the table below). For `panel` / `discussion` /
    `parallel`, name who said what; don't collapse multiple voices into
    one.
-6. **Report cost discipline** in one short trailing line if you spent
+7. **Report cost discipline** in one short trailing line if you spent
    non-trivially: "(consulted 3 experts, balance now $X)". One line max.
 
 ## Reading `consult` results
@@ -69,16 +80,18 @@ them and how to interpret what comes back.
 `consult` returns one of these envelopes:
 
 - **`{status: "complete", job_id, mode, content, stages}`** — success.
-  `content` is shaped per `mode`. Pull from these keys:
+  Every `content` carries a `shape` discriminator matching `mode`.
+  Single-expert modes carry one persona's response; multi-expert modes
+  carry a `list[ParticipantResponse]` shaped `{slot, id, name, response}`.
 
-  | Mode                 | Fields on `content`                                          |
-  |----------------------|--------------------------------------------------------------|
-  | `answer`             | `companion`, `response`                                      |
-  | `answer_crumbs`      | `companion`, `response`, `crumbs?`                           |
-  | `parallel`           | `responses: {companion_name: text}`                          |
-  | `parallel_with_main` | `main_companion`, `main_response`, `participants?: {…: …}`   |
-  | `panel`              | `aggregator_companion`, `synthesis`, `article?`, `stage1?`, `stage2?` |
-  | `discussion`         | `summarizer_companion`, `summary`, `turns?: [{speaker, response, pointer}]` |
+  | Mode                 | Fields on `content`                                                       |
+  |----------------------|---------------------------------------------------------------------------|
+  | `answer`             | `shape="answer"`, `companion`, `companion_id`, `response`                 |
+  | `answer_crumbs`      | `shape="answer"`, `companion`, `companion_id`, `response`, `crumbs?`      |
+  | `parallel`           | `shape="parallel"`, `responses: list[ParticipantResponse]`                |
+  | `parallel_with_main` | `shape="parallel_with_main"`, `main_companion`, `main_companion_id`, `main_response`, `participants?: list[ParticipantResponse]` |
+  | `panel`              | `shape="panel"`, `aggregator_companion`, `aggregator_companion_id`, `synthesis`, `stage1?`, `stage2?` |
+  | `discussion`         | `shape="discussion"`, `summarizer_companion`, `summarizer_companion_id`, `summary`, `turns?: list[{speaker, speaker_id, response, pointer}]` |
 
   Intermediate fields marked `?` are absent when the engine ran with
   `RETURN_INTERMEDIATE_STEPS=false`. Don't assume they're there — the
@@ -96,14 +109,31 @@ them and how to interpret what comes back.
   No credit was spent. Fix the inputs and re-call — do **not** try to
   poll this `job_id`, no row exists.
 
+- **`{status: "ambiguous", kind, field, name, candidates, hint}`** — a
+  `main` or `participants` name maps to more than one visible companion
+  (or team). `candidates` is the list of `{id, name, ...}` rows it could
+  have meant. Re-call with the `cmp_<uuid>` / `team_<uuid>` id of the
+  intended row.
+
+- **`{status: "visibility_violation", message}`** — server rejected the
+  call because a private companion would join a non-private team (or an
+  analogous case). Surface the message; this is a hard constraint, not a
+  retry path.
+
 - **`{status: "timeout", job_id}`** — the run is still going. Surface
   the `job_id` so the user can recover it later with
   `uv run python client.py jobs get <job_id>`. Do not silently retry —
   that's a double-spend.
 
 - **`{status: "error", http_status, body, ...}`** — POST or poll failed
-  at the HTTP layer. Read `body` for the reason; common causes are an
-  exhausted balance (402) or a malformed request (422).
+  at the HTTP layer. Read `body` for the reason. Common causes:
+  - **402**: exhausted balance.
+  - **422 unknown_model**: a `model` override (set at the API/CLI layer)
+    was outside the allow-list. `body.detail[*].ctx.accepted` lists the
+    slugs you may pick — same data as `list_models`.
+  - **422 temperature_out_of_range** / **top_p_out_of_range**: bounds
+    violation. `ctx.min` / `ctx.max` / `ctx.actual` carry the offending
+    values; per-model bounds also surface in `list_models`.
 
 ## Failure modes
 
@@ -114,11 +144,17 @@ them and how to interpret what comes back.
   top up or proceed without consultation.
 - **Unknown companion name** → re-call `discover` (the user may have
   generated something new this session) before assuming the name is bad.
+- **Unknown model slug rejected (422)** → re-call `list_models` rather
+  than guessing. The accepted list is also embedded in the 422 body's
+  `ctx.accepted`.
 
 ## Quick reference — what each tool returns
 
-- `discover()` → `{teams: [{id, name, members: [{name, kind, description}]}],
-   companions: [{name, kind, visibility, description}]}`
-- `consult(prompt, mode, main?, participants?, timeout_seconds=300)` →
+- `discover()` → `{teams: [{id, name, visibility, members: [{id, name,
+   kind, description}]}], companions: [{id, name, kind, visibility,
+   description, teams}]}`
+- `list_models()` → `{models: [{slug, display_name, temperature_min,
+   temperature_max, top_p_min, top_p_max}, ...]}` (alphabetical by slug)
+- `consult(prompt, mode, main?, participants?, timeout_seconds=600)` →
    see "Reading `consult` results" above.
 - `check_balance()` → API balance envelope (pass-through).
