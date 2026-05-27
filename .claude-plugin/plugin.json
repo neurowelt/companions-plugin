@@ -1,7 +1,7 @@
 {
   "name": "companions",
   "description": "Consult a panel of generated expert personas inside Claude Code. Bundles the companions MCP server (discover, consult, check_balance) and a skill that nudges Claude to reach for it when a problem benefits from domain-expert perspectives — explicit asks, contested questions, or moments when you've hit a wall.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": {
     "name": "humx.ai"
   },
